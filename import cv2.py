@@ -1,63 +1,140 @@
-import cv2
-import face_recognition
-from collections import deque
+import os
+import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
 
-reference_image_path = "profile.jpg"
-reference_image = face_recognition.load_image_file(reference_image_path)
-reference_face_encodings = face_recognition.face_encodings(reference_image)
+PROFILE_DIR = "linkedin_profiles"
+os.makedirs(PROFILE_DIR, exist_ok=True)
 
-if len(reference_face_encodings) > 0:
-    reference_face_encoding = reference_face_encodings[0]
-else:
-    raise ValueError("No face found in the reference image.")
+# LinkedIn credentials
+LINKEDIN_EMAIL = "your email"  # Replace with your LinkedIn email
+LINKEDIN_PASSWORD = "your password"        # Replace with your LinkedIn password
 
-recognition_history = deque(maxlen=5)  
+PROFILE_LINKS_FILE = "linkedin_profiles.txt"
 
-cap = cv2.VideoCapture(0)
+SEARCH_QUERY = 'site:linkedin.com/in/ ("developer") (croatia")'
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
 
-    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-    rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+def scrape_google_for_profiles():
+    """Scrape Google search results for LinkedIn profile links."""
+    options = webdriver.ChromeOptions()
+    service = Service("C:\\your\path\chromedriver.exe")  # Update path to ChromeDriver
+    driver = webdriver.Chrome(service=service, options=options)
 
-    face_locations = face_recognition.face_locations(rgb_small_frame)
-    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+    try:
+        driver.get("https://www.google.com/")
 
-    # Assume unmatched initially
-    label = "Unmatched"
-    color = (0, 0, 255)
+        try:
+            accept_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept all')]"))
+            )
+            accept_button.click()
+            print("Accepted Google cookie consent.")
+        except Exception:
+            print("No cookie consent dialog found.")
 
-    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-        matches = face_recognition.compare_faces([reference_face_encoding], face_encoding, tolerance=0.7)
+        search_box = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.NAME, "q"))
+        )
+        search_box.send_keys(SEARCH_QUERY)
+        search_box.send_keys(Keys.RETURN)
 
-        if True in matches:
-            recognition_history.append("Matched")
-        else:
-            recognition_history.append("Unmatched")
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.yuRUbf a"))
+        )
 
-        if recognition_history.count("Matched") > recognition_history.count("Unmatched"):
-            label = "Matched"
-            color = (0, 255, 0)
-        else:
-            label = "Unmatched"
-            color = (0, 0, 255)
+        profile_links = []
+        results = driver.find_elements(By.CSS_SELECTOR, "div.yuRUbf a")
+        for result in results:
+            href = result.get_attribute("href")
+            if "linkedin.com/in/" in href:
+                profile_links.append(href)
 
-        top *= 4
-        right *= 4
-        bottom *= 4
-        left *= 4
+        print(f"Found {len(profile_links)} LinkedIn profile links.")
+        
+        with open(PROFILE_LINKS_FILE, "w") as file:
+            for link in profile_links:
+                file.write(link + "\n")
+        print(f"Saved LinkedIn profile links to {PROFILE_LINKS_FILE}.")
+    finally:
+        driver.quit()
 
-        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-        cv2.putText(frame, label, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
 
-    # Display the frame
-    cv2.imshow('Face Recognition', frame)
+def login_to_linkedin(driver):
+    """Log in to LinkedIn using Selenium."""
+    driver.get("https://www.linkedin.com/login")
+    time.sleep(3)
+    driver.find_element(By.ID, "username").send_keys(LINKEDIN_EMAIL)
+    driver.find_element(By.ID, "password").send_keys(LINKEDIN_PASSWORD)
+    driver.find_element(By.ID, "password").submit()
+    print("Logged in to LinkedIn.")
+    time.sleep(5)  
 
-    if cv2.waitKey(1) == ord('q'):
-        break
 
-cap.release()
-cv2.destroyAllWindows()
+def download_profile_picture(driver, profile_url, profile_name):
+    """Download the profile picture from a LinkedIn profile."""
+    try:
+        driver.get(profile_url)
+        time.sleep(5)  
+
+        profile_image_element = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//img[contains(@class, 'profile-photo')] | //img[contains(@class, 'pv-top-card-profile-picture__image')]")
+            )
+        )
+        image_url = profile_image_element.get_attribute("src")
+        print(f"Found profile picture for {profile_name}: {image_url}")
+
+        response = requests.get(image_url)
+        response.raise_for_status() 
+        image_path = os.path.join(PROFILE_DIR, f"{profile_name}.jpg")
+        with open(image_path, "wb") as image_file:
+            image_file.write(response.content)
+        print(f"Saved profile picture: {image_path}")
+
+    except Exception as e:
+        print(f"Could not download profile picture for {profile_url}: {e}")
+
+
+def process_profiles():
+    """Process the LinkedIn profile links and download their pictures."""
+    if not os.path.exists(PROFILE_LINKS_FILE):
+        print(f"No file found: {PROFILE_LINKS_FILE}")
+        return
+
+    with open(PROFILE_LINKS_FILE, "r") as file:
+        profile_links = [line.strip() for line in file.readlines()]
+
+    if not profile_links:
+        print("No LinkedIn profile links found in the file.")
+        return
+
+    options = webdriver.ChromeOptions()
+    service = Service("C:\\Windows\\chromedriver.exe")  # Update path to ChromeDriver
+    driver = webdriver.Chrome(service=service, options=options)
+
+    try:
+        login_to_linkedin(driver)
+
+        for idx, profile_url in enumerate(profile_links):
+            print(f"Processing profile {idx + 1}/{len(profile_links)}: {profile_url}")
+
+            profile_name = profile_url.split("/")[-1]  
+            download_profile_picture(driver, profile_url, profile_name)
+
+    finally:
+        driver.quit()
+        print("Finished processing profiles.")
+
+
+if __name__ == "__main__":
+    print("Scraping Google for LinkedIn profile links...")
+    scrape_google_for_profiles()
+
+    print("Processing LinkedIn profiles...")
+    process_profiles()
